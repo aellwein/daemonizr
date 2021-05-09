@@ -1,6 +1,6 @@
 [package]
 name = "daemonizr"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Alex Ellwein <alex.ellwein@gmail.com>"]
 edition = "2018"
 description = "Small crate which helps with writing daemon applications in Rust"
