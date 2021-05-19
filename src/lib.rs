@@ -146,7 +146,7 @@ impl Daemonizr {
 
     /// Umask to use for daemon
     pub fn umask(mut self, umask: u16) -> Result<Self, DaemonizrError> {
-        match Mode::from_bits(umask) {
+        match Mode::from_bits(umask as u32) {
             Some(x) => {
                 self.umask = x;
                 Ok(self)
