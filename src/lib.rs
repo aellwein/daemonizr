@@ -573,6 +573,6 @@ impl std::fmt::Display for DaemonizrError {
 impl Error for DaemonizrError {
     /// [Error] trait implementation for DaemonizrError
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self)
+        None
     }
 }
