@@ -1,3 +1,5 @@
+[![Rust](https://github.com/aellwein/daemonizr/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/aellwein/daemonizr/actions/workflows/rust.yml)
+
 daemonizr
 =========
 
