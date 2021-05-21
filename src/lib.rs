@@ -55,7 +55,9 @@
 //!
 use nix::{
     fcntl::{flock, open, OFlag},
-    libc::{getgrgid, getgrnam, getpwnam, getpwuid, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO},
+    libc::{
+        getgrgid, getgrnam, getpwnam, getpwuid, mode_t, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO,
+    },
     sys::stat::{umask, Mode},
     unistd::{close, dup, fork, geteuid, getpid, setgid, setsid, setuid, write, Gid, Uid},
 };
@@ -146,7 +148,7 @@ impl Daemonizr {
 
     /// Umask to use for daemon
     pub fn umask(mut self, umask: u16) -> Result<Self, DaemonizrError> {
-        match Mode::from_bits(umask as u32) {
+        match Mode::from_bits(umask as mode_t) {
             Some(x) => {
                 self.umask = x;
                 Ok(self)
