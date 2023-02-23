@@ -1,6 +1,6 @@
 [package]
 name = "daemonizr"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Alex Ellwein <alex.ellwein@gmail.com>"]
 edition = "2018"
 description = "Small crate which helps with writing daemon applications in Rust"
@@ -13,5 +13,4 @@ categories = ["os::unix-apis"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-nix = "0.23.1"
-
+nix = "0.26.2"
