@@ -6,7 +6,7 @@ on:
       - main
       - develop
   pull_request:
-    branches: 
+    branches:
       - main
 
 env:
@@ -20,9 +20,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --verbose
     # no tests for now :-(
     # - name: Run tests
     #  run: cargo test --verbose
