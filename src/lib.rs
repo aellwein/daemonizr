@@ -214,20 +214,20 @@ impl Daemonizr {
             return Err(DaemonizrError::FailedToSetsid(e.to_string()));
         }
 
-        // setuid()
-        match self.user {
-            User::Id(u) => {
-                if let Err(e) = setuid(Uid::from_raw(u)) {
-                    return Err(DaemonizrError::FailedToSetUser(u, e.to_string()));
-                }
-            }
-        }
-
         // setgid()
         match self.group {
             Group::Id(g) => {
                 if let Err(e) = setgid(Gid::from_raw(g)) {
                     return Err(DaemonizrError::FailedToSetGroup(g, e.to_string()));
+                }
+            }
+        }
+
+        // setuid()
+        match self.user {
+            User::Id(u) => {
+                if let Err(e) = setuid(Uid::from_raw(u)) {
+                    return Err(DaemonizrError::FailedToSetUser(u, e.to_string()));
                 }
             }
         }
