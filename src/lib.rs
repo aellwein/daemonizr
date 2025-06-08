@@ -1,3 +1,4 @@
+#![allow(clippy::needless_doctest_main)]
 //! Small crate which helps with writing daemon applications in Rust.
 //!
 //! I am aware about [daemonize](https://crates.io/crates/daemonize) and
@@ -54,12 +55,12 @@
 //! > where the "nix" and "libc" crates are available.
 //!
 use nix::{
-    fcntl::{flock, open, OFlag},
+    fcntl::{OFlag, flock, open},
     libc::{
-        getgrgid, getgrnam, getpwnam, getpwuid, mode_t, STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO,
+        STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO, getgrgid, getgrnam, getpwnam, getpwuid, mode_t,
     },
-    sys::stat::{umask, Mode},
-    unistd::{close, dup, fork, geteuid, getpid, setgid, setsid, setuid, write, Gid, Uid},
+    sys::stat::{Mode, umask},
+    unistd::{Gid, Uid, close, dup, fork, geteuid, getpid, setgid, setsid, setuid, write},
 };
 use std::os::unix::io::RawFd;
 use std::{
@@ -100,6 +101,7 @@ impl Daemonizr {
     /// * PID file "daemonizr.pid" in current directory is used as PID file;
     /// * the stdout and stderr are both closed.
     ///
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let work_dir = current_dir().expect("unable to get current working directory");
         let (user, group) = whoami().expect("unable to determine current user");
@@ -233,9 +235,9 @@ impl Daemonizr {
         }
 
         // close stdin/stdout/stderr
-        if let Err(_) = close(STDIN_FILENO) {} // 0 - stdin
-        if let Err(_) = close(STDOUT_FILENO) {}; // 1 - stdout
-        if let Err(_) = close(STDERR_FILENO) {}; // 2 - stderr
+        if close(STDIN_FILENO).is_err() { /* cannot be handled */ } // 0 - stdin
+        if close(STDOUT_FILENO).is_err() { /* cannot be handled */ }; // 1 - stdout
+        if close(STDERR_FILENO).is_err() { /* cannot be handled */ }; // 2 - stderr
 
         // set umask
         umask(self.umask);
@@ -243,7 +245,7 @@ impl Daemonizr {
         // set working directory
         if let Err(e) = set_current_dir(&self.work_dir) {
             return Err(DaemonizrError::FailedSetWorkDir(
-                (&self.work_dir.clone().display()).to_string(),
+                self.work_dir.clone().display().to_string(),
                 e.to_string(),
             ));
         }
@@ -258,7 +260,7 @@ impl Daemonizr {
                 return Err(DaemonizrError::FailedToReopen(
                     "stdin".to_owned(),
                     e.to_string(),
-                ))
+                ));
             }
             Ok(x) => x,
         };
@@ -349,7 +351,7 @@ impl Daemonizr {
                         if u > 0 {
                             (
                                 pf_fd,
-                                u32::from_str_radix(&s, 10).expect("unable to parse PID to number"),
+                                s.parse::<u32>().expect("unable to parse PID to number"),
                             )
                         } else {
                             return Err(DaemonizrError::FailedToReadPidfile(
@@ -395,12 +397,12 @@ pub enum Stderr {
 fn whoami() -> Result<(User, Group), DaemonizrError> {
     let uid = geteuid();
     let pwraw = unsafe { getpwuid(uid.as_raw()) };
-    return if pwraw.is_null() {
+    if pwraw.is_null() {
         Err(DaemonizrError::NoUserOrGroup)
     } else {
         let gid = unsafe { (*pwraw).pw_gid };
         Ok((User::Id(uid.as_raw()), Group::Id(gid)))
-    };
+    }
 }
 
 /// User object holds a valid user id (UID) to change to after child process has been daemonized.
@@ -419,11 +421,11 @@ impl User {
     pub fn by_uid(uid: u32) -> Result<User, DaemonizrError> {
         unsafe {
             let rawpw = getpwuid(uid);
-            return if rawpw.is_null() {
+            if rawpw.is_null() {
                 Err(DaemonizrError::InvalidUid(uid))
             } else {
                 Ok(User::Id(uid))
-            };
+            }
         }
     }
 
@@ -435,11 +437,11 @@ impl User {
                 Ok(s) => s,
             };
             let rawpw = getpwnam(cs.as_ptr());
-            return if rawpw.is_null() {
+            if rawpw.is_null() {
                 Err(DaemonizrError::InvalidUsername(username.to_string()))
             } else {
                 Ok(User::Id((*rawpw).pw_uid))
-            };
+            }
         }
     }
 }
@@ -449,12 +451,12 @@ impl Group {
     pub fn by_gid(gid: u32) -> Result<Group, DaemonizrError> {
         unsafe {
             let group = getgrgid(gid);
-            return if group.is_null() {
+            if group.is_null() {
                 Err(DaemonizrError::InvalidGid(gid))
             } else {
                 Ok(Group::Id((*group).gr_gid))
-            };
-        };
+            }
+        }
     }
 
     /// Lookup group by given group name.
@@ -465,11 +467,11 @@ impl Group {
         };
         unsafe {
             let rawpw = getgrnam(cs.as_ptr());
-            return if rawpw.is_null() {
+            if rawpw.is_null() {
                 Err(DaemonizrError::InvalidGroupname(groupname.to_string()))
             } else {
                 Ok(Group::Id((*rawpw).gr_gid))
-            };
+            }
         }
     }
 }
