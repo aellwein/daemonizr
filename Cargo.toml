@@ -2,7 +2,7 @@
 name = "daemonizr"
 version = "0.1.6"
 authors = ["Alex Ellwein <alex.ellwein@gmail.com>"]
-edition = "2018"
+edition = "2024"
 description = "Small crate which helps with writing daemon applications in Rust"
 repository = "https://github.com/aellwein/daemonizr"
 readme = "README.md"
