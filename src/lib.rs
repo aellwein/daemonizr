@@ -355,7 +355,7 @@ impl Daemonizr {
                             )
                         } else {
                             return Err(DaemonizrError::FailedToReadPidfile(
-                                format!("invalid pid: {}", s).to_owned(),
+                                format!("invalid pid: {s}").to_owned(),
                             ));
                         }
                     }
@@ -540,35 +540,35 @@ impl std::fmt::Display for DaemonizrError {
             DaemonizrError::WorkDirNotDir(m) => {
                 write!(f, "working directory is not a directory: {}", m.display())
             }
-            DaemonizrError::InvalidUid(m) => write!(f, "invalid uid provided: {}", m),
-            DaemonizrError::InvalidGid(m) => write!(f, "invalid gid provided: {}", m),
-            DaemonizrError::InvalidUmask(u) => write!(f, "invalid umask provided: {}", u),
-            DaemonizrError::InvalidUsername(s) => write!(f, "invalid username: {}", s),
-            DaemonizrError::InvalidGroupname(s) => write!(f, "invalid groupname: {}", s),
+            DaemonizrError::InvalidUid(m) => write!(f, "invalid uid provided: {m}"),
+            DaemonizrError::InvalidGid(m) => write!(f, "invalid gid provided: {m}"),
+            DaemonizrError::InvalidUmask(u) => write!(f, "invalid umask provided: {u}"),
+            DaemonizrError::InvalidUsername(s) => write!(f, "invalid username: {s}"),
+            DaemonizrError::InvalidGroupname(s) => write!(f, "invalid groupname: {s}"),
             DaemonizrError::ErrorCString => write!(f, "invalid C string"),
             DaemonizrError::NoUserOrGroup => {
                 write!(f, "unable to determine user or group of current user")
             }
-            DaemonizrError::ForkFailed(e) => write!(f, "fork failed: {}", e),
+            DaemonizrError::ForkFailed(e) => write!(f, "fork failed: {e}"),
             DaemonizrError::FailedSetWorkDir(d, e) => {
-                write!(f, "failed to set current directory to {}: {}", d, e)
+                write!(f, "failed to set current directory to {d}: {e}")
             }
             DaemonizrError::FailedToSetUser(u, e) => {
-                write!(f, "failed to set user to UID {}: {}", u, e)
+                write!(f, "failed to set user to UID {u}: {e}")
             }
             DaemonizrError::FailedToSetGroup(g, e) => {
-                write!(f, "failed to set group to GID {}: {}", g, e)
+                write!(f, "failed to set group to GID {g}: {e}")
             }
-            DaemonizrError::FailedToSetsid(s) => write!(f, "failed to setsid(): {}", s),
-            DaemonizrError::FailedToReopen(s, e) => write!(f, "failed to reopen {}: {}", s, e),
-            DaemonizrError::FailedCreatePidfile(s) => write!(f, "failed to create pid file: {}", s),
+            DaemonizrError::FailedToSetsid(s) => write!(f, "failed to setsid(): {s}"),
+            DaemonizrError::FailedToReopen(s, e) => write!(f, "failed to reopen {s}: {e}"),
+            DaemonizrError::FailedCreatePidfile(s) => write!(f, "failed to create pid file: {s}"),
             DaemonizrError::AlreadyRunning => {
                 write!(f, "another daemon is already locking pidfile")
             }
-            DaemonizrError::ErrorLockingPidfile(s) => write!(f, "error locking pidfile: {}", s),
-            DaemonizrError::FailedToWritePidfile(s) => write!(f, "error writing pidfile: {}", s),
-            DaemonizrError::FailedToOpenPidfile(s) => write!(f, "error opening pidfile: {}", s),
-            DaemonizrError::FailedToReadPidfile(s) => write!(f, "error reading pidfile: {}", s),
+            DaemonizrError::ErrorLockingPidfile(s) => write!(f, "error locking pidfile: {s}"),
+            DaemonizrError::FailedToWritePidfile(s) => write!(f, "error writing pidfile: {s}"),
+            DaemonizrError::FailedToOpenPidfile(s) => write!(f, "error opening pidfile: {s}"),
+            DaemonizrError::FailedToReadPidfile(s) => write!(f, "error reading pidfile: {s}"),
             DaemonizrError::NoDaemonFound => write!(f, "no existing daemon was found"),
         }
     }
