@@ -1,4 +1,5 @@
 #![allow(clippy::needless_doctest_main)]
+#![cfg(not(doctest))]
 //! Small crate which helps with writing daemon applications in Rust.
 //!
 //! I am aware about [daemonize](https://crates.io/crates/daemonize) and
@@ -55,20 +56,22 @@
 //! > where the "nix" and "libc" crates are available.
 //!
 use nix::{
-    fcntl::{OFlag, flock, open},
+    fcntl::{Flock, OFlag, open},
     libc::{
         STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO, getgrgid, getgrnam, getpwnam, getpwuid, mode_t,
     },
     sys::stat::{Mode, umask},
-    unistd::{Gid, Uid, close, dup, fork, geteuid, getpid, setgid, setsid, setuid, write},
+    unistd::{Gid, Uid, close, dup, fork, geteuid, getpid, setgid, setsid, setuid},
 };
-use std::os::unix::io::RawFd;
 use std::{
     env::{current_dir, set_current_dir},
     error::Error,
     ffi::CString,
+    fs,
+    io::Write,
     path::PathBuf,
 };
+use std::{fs::File, os::fd::AsFd};
 
 /// Daemonizr holds context needed for spawning the daemon process.
 ///
@@ -88,7 +91,7 @@ pub struct Daemonizr {
     pidfile: PathBuf,
     stdout: Stdout,
     stderr: Stderr,
-    fd_lock: RawFd,
+    lockfile: Option<Flock<File>>,
 }
 
 /// Super
@@ -115,7 +118,7 @@ impl Daemonizr {
             pidfile,
             stdout: Stdout::Close,
             stderr: Stderr::Close,
-            fd_lock: -1 as RawFd,
+            lockfile: None,
         }
     }
 
@@ -266,10 +269,10 @@ impl Daemonizr {
         };
 
         // open stdout
-        let stdo = match self.stdout {
-            Stdout::Close => dup(stdi),
+        let stdo = match &self.stdout {
+            Stdout::Close => dup(stdi.as_fd()),
             Stdout::Redirect(f) => open(
-                &f,
+                f,
                 OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_APPEND,
                 Mode::from_bits(0o666).expect("invalid mode 0o666"),
             ),
@@ -283,10 +286,10 @@ impl Daemonizr {
         }
 
         // open stderr
-        let stde = match self.stderr {
-            Stderr::Close => dup(stdi),
+        let stde = match &self.stderr {
+            Stderr::Close => dup(stdi.as_fd()),
             Stderr::Redirect(f) => open(
-                &f,
+                f,
                 OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_APPEND,
                 Mode::from_bits(0o666).expect("invalid mode 0o666"),
             ),
@@ -299,27 +302,26 @@ impl Daemonizr {
             ));
         }
 
-        // create pidfile
-        self.fd_lock = match open(
-            &self.pidfile,
-            OFlag::O_CREAT | OFlag::O_RDWR,
-            Mode::from_bits(0o666).expect("invalid mode 0o666"),
-        ) {
-            Err(e) => return Err(DaemonizrError::FailedCreatePidfile(e.to_string())),
-            Ok(x) => x,
-        };
-
-        match flock(self.fd_lock, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+        // (try to) create lockfile.
+        // If creation fails, it means that another daemon is already running.
+        let lockfile = match File::options()
+            .create_new(true)
+            .write(true)
+            .read(true)
+            .open(&self.pidfile)
+        {
             Err(_) => return Err(DaemonizrError::AlreadyRunning),
-            Ok(_) => {
-                let pid = getpid();
-                let pidb = format!("{}\n", pid.as_raw());
-                if let Err(e) = write(self.fd_lock, pidb.as_bytes()) {
-                    return Err(DaemonizrError::FailedToWritePidfile(e.to_string()));
-                }
-            }
+            Ok(f) => f,
         };
-
+        self.lockfile = match Flock::lock(lockfile, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+            Err(_) => return Err(DaemonizrError::AlreadyRunning),
+            Ok(f) => Some(f),
+        };
+        let pid = getpid();
+        let pidb = format!("{}\n", pid.as_raw());
+        if let Err(e) = self.lockfile.as_mut().unwrap().write_all(pidb.as_bytes()) {
+            return Err(DaemonizrError::FailedToWritePidfile(e.to_string()));
+        }
         Ok(())
     }
 
@@ -341,7 +343,7 @@ impl Daemonizr {
             Err(e) => return Err(DaemonizrError::FailedToOpenPidfile(e.to_string())),
             Ok(pf_fd) => {
                 let mut buf: [u8; 10] = [32; 10];
-                match nix::unistd::read(pf_fd, &mut buf as &mut [u8]) {
+                match nix::unistd::read(pf_fd.as_fd(), &mut buf as &mut [u8]) {
                     Err(e) => return Err(DaemonizrError::FailedToReadPidfile(e.to_string())),
                     Ok(u) => {
                         let s = String::from_utf8(buf.to_vec())
@@ -363,7 +365,7 @@ impl Daemonizr {
             }
         };
         // now check that the pidfile is still locked, i.e. not stale
-        match flock(pf_fd, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+        match Flock::lock(pf_fd, nix::fcntl::FlockArg::LockExclusiveNonblock) {
             Err(_) => {}
             Ok(_) => {
                 /* unexpected! */
@@ -371,6 +373,15 @@ impl Daemonizr {
             }
         };
         Ok(pid)
+    }
+}
+
+impl Drop for Daemonizr {
+    fn drop(&mut self) {
+        if self.lockfile.is_some() {
+            _ = fs::remove_file(self.pidfile.clone());
+            // lock object will be released automatically, because Flock is implementing Drop trait
+        }
     }
 }
 
