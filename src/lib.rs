@@ -60,7 +60,7 @@ use nix::{
         STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO, getgrgid, getgrnam, getpwnam, getpwuid, mode_t,
     },
     sys::stat::{Mode, umask},
-    unistd::{Gid, Uid, close, dup, fork, geteuid, getpid, setgid, setsid, setuid, write},
+    unistd::{Gid, Uid, close, dup, fork, geteuid, setgid, setsid, setuid, write},
 };
 use std::os::unix::io::RawFd;
 use std::{
@@ -200,13 +200,39 @@ impl Daemonizr {
         self
     }
 
+    fn write_pid_file(mut self, child: nix::unistd::Pid) -> Result<(), DaemonizrError> {
+        // create pidfile
+        self.fd_lock = match open(
+            &self.pidfile,
+            OFlag::O_CREAT | OFlag::O_RDWR,
+            Mode::from_bits(0o666).expect("invalid mode 0o666"),
+        ) {
+            Err(e) => return Err(DaemonizrError::FailedCreatePidfile(e.to_string())),
+            Ok(x) => x,
+        };
+
+        match flock(self.fd_lock, nix::fcntl::FlockArg::LockExclusiveNonblock) {
+            Err(_) => return Err(DaemonizrError::AlreadyRunning),
+            Ok(_) => {
+                let pidb = format!("{}\n", child.as_raw());
+                if let Err(e) = write(self.fd_lock, pidb.as_bytes()) {
+                    return Err(DaemonizrError::FailedToWritePidfile(e.to_string()));
+                }
+            }
+        };
+        Ok(())
+    }
+
     /// Perform the actual creation of a daemon process.
     /// In case of success, this function never returns - the parent process will exit with
     /// exit code 0 (success), the child (daemon) process will
     pub fn spawn(mut self) -> Result<(), DaemonizrError> {
         // fork daemon
         match unsafe { fork() } {
-            Ok(nix::unistd::ForkResult::Parent { .. }) => std::process::exit(0),
+            Ok(nix::unistd::ForkResult::Parent { child }) => {
+                self.write_pid_file(child)?;
+                std::process::exit(0)
+            }
             Ok(nix::unistd::ForkResult::Child) => {}
             Err(e) => return Err(DaemonizrError::ForkFailed(e.to_string())),
         }
@@ -298,27 +324,6 @@ impl Daemonizr {
                 e.to_string(),
             ));
         }
-
-        // create pidfile
-        self.fd_lock = match open(
-            &self.pidfile,
-            OFlag::O_CREAT | OFlag::O_RDWR,
-            Mode::from_bits(0o666).expect("invalid mode 0o666"),
-        ) {
-            Err(e) => return Err(DaemonizrError::FailedCreatePidfile(e.to_string())),
-            Ok(x) => x,
-        };
-
-        match flock(self.fd_lock, nix::fcntl::FlockArg::LockExclusiveNonblock) {
-            Err(_) => return Err(DaemonizrError::AlreadyRunning),
-            Ok(_) => {
-                let pid = getpid();
-                let pidb = format!("{}\n", pid.as_raw());
-                if let Err(e) = write(self.fd_lock, pidb.as_bytes()) {
-                    return Err(DaemonizrError::FailedToWritePidfile(e.to_string()));
-                }
-            }
-        };
 
         Ok(())
     }
