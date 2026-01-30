@@ -226,7 +226,7 @@ impl Daemonizr {
     /// Perform the actual creation of a daemon process.
     /// In case of success, this function never returns - the parent process will exit with
     /// exit code 0 (success), the child (daemon) process will
-    pub fn spawn(mut self) -> Result<(), DaemonizrError> {
+    pub fn spawn(self) -> Result<(), DaemonizrError> {
         // fork daemon
         match unsafe { fork() } {
             Ok(nix::unistd::ForkResult::Parent { child }) => {
