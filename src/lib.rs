@@ -216,8 +216,8 @@ impl Daemonizr {
 
         // Write the daemon's own PID.
         let pid = getpid();
-        let pidb = format!("{}\n", pid.as_raw());
-        if let Err(e) = write(self.fd_lock, pidb.as_bytes()) {
+        let pid_content = format!("{}\n", pid.as_raw());
+        if let Err(e) = write(self.fd_lock, pid_content.as_bytes()) {
             return Err(DaemonizrError::FailedToWritePidfile(e.to_string()));
         }
 
@@ -426,7 +426,10 @@ impl Daemonizr {
         }
 
         // The lock is held by the daemon – read the PID it wrote.
-        let mut buf: [u8; 16] = [0; 16];
+        // Maximum PID on Linux is 4,194,304 (7 digits); with the trailing '\n'
+        // that is 8 bytes.  16 bytes is ample on all supported platforms.
+        const MAX_PID_BYTES: usize = 16;
+        let mut buf: [u8; MAX_PID_BYTES] = [0; MAX_PID_BYTES];
         let n = match nix::unistd::read(pf_fd, &mut buf) {
             Err(e) => {
                 let _ = close(pf_fd);
