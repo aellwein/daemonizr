@@ -55,21 +55,18 @@
 //! > where the "nix" and "libc" crates are available.
 //!
 use nix::{
-    fcntl::{OFlag, flock, open},
-    libc::{
-        STDERR_FILENO, STDIN_FILENO, STDOUT_FILENO, getgrgid, getgrnam, getpwnam, getpwuid, mode_t,
-    },
+    fcntl::{Flock, FlockArg, OFlag, open},
+    libc::mode_t,
     sys::stat::{Mode, umask},
     unistd::{
-        Gid, Uid, close, dup, fork, fsync, ftruncate, geteuid, getpid, setgid, setsid, setuid,
-        write,
+        Gid, Uid, dup2_stderr, dup2_stdin, dup2_stdout, fork, fsync, ftruncate, geteuid, getpid,
+        read, setgid, setsid, setuid, write,
     },
 };
-use std::os::unix::io::RawFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::{
     env::{current_dir, set_current_dir},
     error::Error,
-    ffi::CString,
     path::PathBuf,
 };
 
@@ -91,7 +88,7 @@ pub struct Daemonizr {
     pidfile: PathBuf,
     stdout: Stdout,
     stderr: Stderr,
-    fd_lock: RawFd,
+    fd_lock: Option<Flock<OwnedFd>>,
 }
 
 /// Super
@@ -118,7 +115,7 @@ impl Daemonizr {
             pidfile,
             stdout: Stdout::Close,
             stderr: Stderr::Close,
-            fd_lock: -1 as RawFd,
+            fd_lock: None,
         }
     }
 
@@ -209,20 +206,22 @@ impl Daemonizr {
     /// method is called (i.e. before the `fork`, so the lock is inherited by the
     /// child and survives the parent's exit).
     fn write_pid_file(&mut self) -> Result<(), DaemonizrError> {
+        let fd = self.fd_lock.as_ref().expect("fd_lock not initialized");
+
         // Clear previous content so no stale bytes remain after a shorter PID.
-        if let Err(e) = ftruncate(self.fd_lock, 0) {
+        if let Err(e) = ftruncate(fd.as_fd(), 0) {
             return Err(DaemonizrError::FailedToWritePidfile(e.to_string()));
         }
 
         // Write the daemon's own PID.
         let pid = getpid();
         let pid_content = format!("{}\n", pid.as_raw());
-        if let Err(e) = write(self.fd_lock, pid_content.as_bytes()) {
+        if let Err(e) = write(fd.as_fd(), pid_content.as_bytes()) {
             return Err(DaemonizrError::FailedToWritePidfile(e.to_string()));
         }
 
         // Flush to storage so that the PID is visible to readers immediately.
-        if let Err(e) = fsync(self.fd_lock) {
+        if let Err(e) = fsync(fd.as_fd()) {
             return Err(DaemonizrError::FailedToWritePidfile(e.to_string()));
         }
 
@@ -243,7 +242,7 @@ impl Daemonizr {
         // The lock is released automatically by the kernel only when every file
         // descriptor that refers to the file description has been closed – i.e. when
         // the daemon process terminates (normally or via a crash).
-        self.fd_lock = match open(
+        let fd: OwnedFd = match open(
             &self.pidfile,
             OFlag::O_CREAT | OFlag::O_RDWR,
             Mode::from_bits(0o666).expect("invalid mode 0o666"),
@@ -255,17 +254,16 @@ impl Daemonizr {
         // Attempt a non-blocking exclusive lock.  EWOULDBLOCK means another
         // cooperating process already holds the lock → another instance is running.
         // Any other error is an unexpected locking failure.
-        match flock(self.fd_lock, nix::fcntl::FlockArg::LockExclusiveNonblock) {
-            Err(nix::errno::Errno::EWOULDBLOCK) => {
-                let _ = close(self.fd_lock);
+        // On error, `fd` is returned in the Err tuple and dropped (closed) here.
+        self.fd_lock = match Flock::lock(fd, FlockArg::LockExclusiveNonblock) {
+            Ok(flock) => Some(flock),
+            Err((_, nix::errno::Errno::EWOULDBLOCK)) => {
                 return Err(DaemonizrError::AlreadyRunning);
             }
-            Err(e) => {
-                let _ = close(self.fd_lock);
+            Err((_, e)) => {
                 return Err(DaemonizrError::ErrorLockingPidfile(e.to_string()));
             }
-            Ok(_) => {}
-        }
+        };
 
         // fork daemon
         match unsafe { fork() } {
@@ -304,11 +302,6 @@ impl Daemonizr {
             }
         }
 
-        // close stdin/stdout/stderr
-        if close(STDIN_FILENO).is_err() { /* cannot be handled */ } // 0 - stdin
-        if close(STDOUT_FILENO).is_err() { /* cannot be handled */ }; // 1 - stdout
-        if close(STDERR_FILENO).is_err() { /* cannot be handled */ }; // 2 - stderr
-
         // set umask
         umask(self.umask);
 
@@ -320,59 +313,68 @@ impl Daemonizr {
             ));
         }
 
-        // open stdin (always as /dev/null)
-        let stdi = match open(
+        // Open /dev/null once; use dup2_stdin/dup2_stdout/dup2_stderr to redirect
+        // each standard fd to it (or to the caller-specified redirect path).
+        // Using dup2 avoids any need for unsafe: the dup2 syscall atomically
+        // closes the target fd and re-points it, so no manual close() is needed.
+        let devnull = open(
             &PathBuf::from("/dev/null"),
             OFlag::O_RDWR,
             Mode::from_bits(0o666).expect("invalid mode 0o666"),
-        ) {
-            Err(e) => {
-                return Err(DaemonizrError::FailedToReopen(
-                    "stdin".to_owned(),
-                    e.to_string(),
-                ));
+        )
+        .map_err(|e| DaemonizrError::FailedToReopen("stdin".to_owned(), e.to_string()))?;
+
+        // Redirect stdin → /dev/null.
+        dup2_stdin(&devnull)
+            .map_err(|e| DaemonizrError::FailedToReopen("stdin".to_owned(), e.to_string()))?;
+
+        // Redirect stdout → /dev/null or caller-provided file.
+        match self.stdout {
+            Stdout::Close => dup2_stdout(&devnull)
+                .map_err(|e| DaemonizrError::FailedToReopen("stdout".to_owned(), e.to_string()))?,
+            Stdout::Redirect(ref f) => {
+                let out_fd = open(
+                    f,
+                    OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_APPEND,
+                    Mode::from_bits(0o666).expect("invalid mode 0o666"),
+                )
+                .map_err(|e| DaemonizrError::FailedToReopen("stdout".to_owned(), e.to_string()))?;
+                dup2_stdout(&out_fd).map_err(|e| {
+                    DaemonizrError::FailedToReopen("stdout".to_owned(), e.to_string())
+                })?;
+                // out_fd is dropped here; fd 1 still points to the redirect file.
             }
-            Ok(x) => x,
-        };
-
-        // open stdout
-        let stdo = match self.stdout {
-            Stdout::Close => dup(stdi),
-            Stdout::Redirect(ref f) => open(
-                f,
-                OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_APPEND,
-                Mode::from_bits(0o666).expect("invalid mode 0o666"),
-            ),
-        };
-
-        if let Err(e) = stdo {
-            return Err(DaemonizrError::FailedToReopen(
-                "stdout".to_owned(),
-                e.to_string(),
-            ));
         }
 
-        // open stderr
-        let stde = match self.stderr {
-            Stderr::Close => dup(stdi),
-            Stderr::Redirect(ref f) => open(
-                f,
-                OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_APPEND,
-                Mode::from_bits(0o666).expect("invalid mode 0o666"),
-            ),
-        };
-
-        if let Err(e) = stde {
-            return Err(DaemonizrError::FailedToReopen(
-                "stderr".to_owned(),
-                e.to_string(),
-            ));
+        // Redirect stderr → /dev/null or caller-provided file.
+        match self.stderr {
+            Stderr::Close => dup2_stderr(&devnull)
+                .map_err(|e| DaemonizrError::FailedToReopen("stderr".to_owned(), e.to_string()))?,
+            Stderr::Redirect(ref f) => {
+                let err_fd = open(
+                    f,
+                    OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_APPEND,
+                    Mode::from_bits(0o666).expect("invalid mode 0o666"),
+                )
+                .map_err(|e| DaemonizrError::FailedToReopen("stderr".to_owned(), e.to_string()))?;
+                dup2_stderr(&err_fd).map_err(|e| {
+                    DaemonizrError::FailedToReopen("stderr".to_owned(), e.to_string())
+                })?;
+                // err_fd is dropped here; fd 2 still points to the redirect file.
+            }
         }
+        // devnull is dropped here; fds 0/1/2 still point to their targets.
 
         // Write the daemon's own PID to the PID file.  The file descriptor is
         // already open and the exclusive advisory lock is held; just truncate,
         // write the PID, and fsync so that the PID is durable on disk.
         self.write_pid_file()?;
+
+        // Leak fd_lock so that the Flock is never dropped in the child process.
+        // Dropping it would call LOCK_UN and release the advisory lock.  Instead
+        // we intentionally keep the underlying fd open for the daemon's lifetime;
+        // the kernel will release the lock automatically when the process exits.
+        std::mem::forget(self.fd_lock.take());
 
         Ok(())
     }
@@ -393,7 +395,7 @@ impl Daemonizr {
             return Err(DaemonizrError::NoDaemonFound);
         }
 
-        let pf_fd = match open(
+        let fd: OwnedFd = match open(
             &self.pidfile,
             OFlag::O_RDONLY,
             Mode::from_bits(0o666).expect("invalid mode 0o666"),
@@ -405,40 +407,33 @@ impl Daemonizr {
         // Try to acquire an exclusive non-blocking lock.
         //
         // * Success     → we got the lock, meaning no cooperating process holds it.
-        //                 The PID file is stale (daemon has exited).  Close and report
-        //                 NoDaemonFound.
+        //                 The PID file is stale (daemon has exited).  The Flock is
+        //                 dropped here, releasing the lock and closing the fd.
         // * EWOULDBLOCK → another process holds the lock: the daemon is running.
-        //                 Read the PID to report it.
-        // * Other error → unexpected; propagate.
-        match flock(pf_fd, nix::fcntl::FlockArg::LockExclusiveNonblock) {
-            Ok(_) => {
-                // Stale PID file – no daemon is running.
-                let _ = close(pf_fd);
+        //                 The original OwnedFd is returned; use it to read the PID.
+        // * Other error → unexpected; OwnedFd is dropped (closed) and error propagated.
+        let fd: OwnedFd = match Flock::lock(fd, FlockArg::LockExclusiveNonblock) {
+            Ok(_flock) => {
+                // _flock is dropped here → LOCK_UN + fd closed.
                 return Err(DaemonizrError::NoDaemonFound);
             }
-            Err(nix::errno::Errno::EWOULDBLOCK) => {
-                // Daemon is running; fall through to read its PID.
-            }
-            Err(e) => {
-                let _ = close(pf_fd);
+            Err((fd, nix::errno::Errno::EWOULDBLOCK)) => fd,
+            Err((_, e)) => {
                 return Err(DaemonizrError::ErrorLockingPidfile(e.to_string()));
             }
-        }
+        };
 
         // The lock is held by the daemon – read the PID it wrote.
         // Maximum PID on Linux is 4,194,304 (7 digits); with the trailing '\n'
         // that is 8 bytes.  16 bytes is ample on all supported platforms.
         const MAX_PID_BYTES: usize = 16;
         let mut buf: [u8; MAX_PID_BYTES] = [0; MAX_PID_BYTES];
-        let n = match nix::unistd::read(pf_fd, &mut buf) {
-            Err(e) => {
-                let _ = close(pf_fd);
-                return Err(DaemonizrError::FailedToReadPidfile(e.to_string()));
-            }
+        let n = match read(&fd, &mut buf) {
+            Err(e) => return Err(DaemonizrError::FailedToReadPidfile(e.to_string())),
             Ok(n) => n,
         };
-
-        let _ = close(pf_fd);
+        // fd is dropped here (closed automatically).
+        drop(fd);
 
         if n == 0 {
             return Err(DaemonizrError::FailedToReadPidfile(
@@ -479,15 +474,13 @@ pub enum Stderr {
 }
 
 #[doc(hidden)]
-/// Internal function to determine current user and group IDs
+/// Internal function to determine current user and group IDs.
+/// Uses the thread-safe `getpwuid_r` wrapper provided by nix.
 fn whoami() -> Result<(User, Group), DaemonizrError> {
     let uid = geteuid();
-    let pwraw = unsafe { getpwuid(uid.as_raw()) };
-    if pwraw.is_null() {
-        Err(DaemonizrError::NoUserOrGroup)
-    } else {
-        let gid = unsafe { (*pwraw).pw_gid };
-        Ok((User::Id(uid.as_raw()), Group::Id(gid)))
+    match nix::unistd::User::from_uid(uid) {
+        Ok(Some(user)) => Ok((User::Id(uid.as_raw()), Group::Id(user.gid.as_raw()))),
+        _ => Err(DaemonizrError::NoUserOrGroup),
     }
 }
 
@@ -505,29 +498,17 @@ pub enum Group {
 impl User {
     /// Lookup User by given uid.
     pub fn by_uid(uid: u32) -> Result<User, DaemonizrError> {
-        unsafe {
-            let rawpw = getpwuid(uid);
-            if rawpw.is_null() {
-                Err(DaemonizrError::InvalidUid(uid))
-            } else {
-                Ok(User::Id(uid))
-            }
+        match nix::unistd::User::from_uid(Uid::from_raw(uid)) {
+            Ok(Some(_)) => Ok(User::Id(uid)),
+            _ => Err(DaemonizrError::InvalidUid(uid)),
         }
     }
 
     /// Lookup User by given username.
     pub fn by_name(username: &str) -> Result<User, DaemonizrError> {
-        unsafe {
-            let cs = match CString::new(username) {
-                Err(_) => return Err(DaemonizrError::ErrorCString),
-                Ok(s) => s,
-            };
-            let rawpw = getpwnam(cs.as_ptr());
-            if rawpw.is_null() {
-                Err(DaemonizrError::InvalidUsername(username.to_string()))
-            } else {
-                Ok(User::Id((*rawpw).pw_uid))
-            }
+        match nix::unistd::User::from_name(username) {
+            Ok(Some(user)) => Ok(User::Id(user.uid.as_raw())),
+            _ => Err(DaemonizrError::InvalidUsername(username.to_string())),
         }
     }
 }
@@ -535,29 +516,17 @@ impl User {
 impl Group {
     /// Lookup Group by given gid (group id).
     pub fn by_gid(gid: u32) -> Result<Group, DaemonizrError> {
-        unsafe {
-            let group = getgrgid(gid);
-            if group.is_null() {
-                Err(DaemonizrError::InvalidGid(gid))
-            } else {
-                Ok(Group::Id((*group).gr_gid))
-            }
+        match nix::unistd::Group::from_gid(Gid::from_raw(gid)) {
+            Ok(Some(_)) => Ok(Group::Id(gid)),
+            _ => Err(DaemonizrError::InvalidGid(gid)),
         }
     }
 
     /// Lookup group by given group name.
     pub fn by_name(groupname: &str) -> Result<Group, DaemonizrError> {
-        let cs = match CString::new(groupname) {
-            Err(_) => return Err(DaemonizrError::ErrorCString),
-            Ok(s) => s,
-        };
-        unsafe {
-            let rawpw = getgrnam(cs.as_ptr());
-            if rawpw.is_null() {
-                Err(DaemonizrError::InvalidGroupname(groupname.to_string()))
-            } else {
-                Ok(Group::Id((*rawpw).gr_gid))
-            }
+        match nix::unistd::Group::from_name(groupname) {
+            Ok(Some(group)) => Ok(Group::Id(group.gid.as_raw())),
+            _ => Err(DaemonizrError::InvalidGroupname(groupname.to_string())),
         }
     }
 }
@@ -581,8 +550,6 @@ pub enum DaemonizrError {
     InvalidUsername(String),
     /// Provided groupname is invalid
     InvalidGroupname(String),
-    /// Internal error while converting [CString]
-    ErrorCString,
     /// Failed to determine current user / group
     NoUserOrGroup,
     /// failed to daemonize (fork) process
@@ -631,7 +598,6 @@ impl std::fmt::Display for DaemonizrError {
             DaemonizrError::InvalidUmask(u) => write!(f, "invalid umask provided: {u}"),
             DaemonizrError::InvalidUsername(s) => write!(f, "invalid username: {s}"),
             DaemonizrError::InvalidGroupname(s) => write!(f, "invalid groupname: {s}"),
-            DaemonizrError::ErrorCString => write!(f, "invalid C string"),
             DaemonizrError::NoUserOrGroup => {
                 write!(f, "unable to determine user or group of current user")
             }
@@ -733,17 +699,16 @@ mod tests {
             Mode::from_bits(0o666).expect("invalid mode"),
         )
         .expect("could not open test pid file");
-        flock(fd, nix::fcntl::FlockArg::LockExclusiveNonblock)
-            .expect("could not lock test pid file");
+        let locked_fd =
+            Flock::lock(fd, FlockArg::LockExclusiveNonblock).expect("could not lock test pid file");
         let pid = getpid();
         let content = format!("{}\n", pid.as_raw());
-        write(fd, content.as_bytes()).expect("could not write test pid");
+        write(locked_fd.as_fd(), content.as_bytes()).expect("could not write test pid");
 
         let result = daemonizr_with_pidfile(path.clone()).search();
 
-        // Clean up before asserting so the file is removed even on failure.
-        let _ = flock(fd, nix::fcntl::FlockArg::Unlock);
-        let _ = close(fd);
+        // Drop the lock before asserting so cleanup happens even on failure.
+        drop(locked_fd);
         let _ = fs::remove_file(&path);
 
         assert!(
@@ -753,8 +718,8 @@ mod tests {
         );
     }
 
-    /// Two concurrent calls to flock with LockExclusiveNonblock on the same file
-    /// must behave as advisory: the second must fail with EWOULDBLOCK.
+    /// Two concurrent Flock::lock calls on separate file descriptions of the same
+    /// file must behave as advisory: the second must fail with EWOULDBLOCK.
     #[test]
     fn test_flock_second_lock_is_ewouldblock() {
         let path = tmp_pidfile("flock");
@@ -765,7 +730,8 @@ mod tests {
             Mode::from_bits(0o666).expect("invalid mode"),
         )
         .expect("open fd1");
-        flock(fd1, nix::fcntl::FlockArg::LockExclusiveNonblock).expect("first lock must succeed");
+        let locked1 =
+            Flock::lock(fd1, FlockArg::LockExclusiveNonblock).expect("first lock must succeed");
 
         // Open a *separate* file description so flock treats it independently.
         let fd2 = open(
@@ -774,15 +740,13 @@ mod tests {
             Mode::from_bits(0o666).expect("invalid mode"),
         )
         .expect("open fd2");
-        let result = flock(fd2, nix::fcntl::FlockArg::LockExclusiveNonblock);
+        let result = Flock::lock(fd2, FlockArg::LockExclusiveNonblock);
 
-        let _ = close(fd2);
-        let _ = flock(fd1, nix::fcntl::FlockArg::Unlock);
-        let _ = close(fd1);
+        drop(locked1);
         let _ = fs::remove_file(&path);
 
         assert!(
-            matches!(result, Err(nix::errno::Errno::EWOULDBLOCK)),
+            matches!(result, Err((_, nix::errno::Errno::EWOULDBLOCK))),
             "expected EWOULDBLOCK when file is already locked, got {result:?}"
         );
     }
