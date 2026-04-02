@@ -10,10 +10,11 @@
 //! 3. Prints `"ready\n"` to stdout so the integration test knows the lock is held.
 //! 4. Sleeps for up to 60 seconds (or until killed by the test runner).
 use nix::{
-    fcntl::{FlockArg, OFlag, flock, open},
+    fcntl::{Flock, FlockArg, OFlag, open},
     sys::stat::Mode,
     unistd::{getpid, write},
 };
+use std::os::fd::AsFd;
 use std::{path::PathBuf, thread, time::Duration};
 
 fn main() {
@@ -35,14 +36,14 @@ fn main() {
         std::process::exit(1);
     });
 
-    flock(fd, FlockArg::LockExclusiveNonblock).unwrap_or_else(|e| {
-        eprintln!("flock failed: {e}");
+    let locked_fd = Flock::lock(fd, FlockArg::LockExclusiveNonblock).unwrap_or_else(|e| {
+        eprintln!("flock failed: {}", e.1);
         std::process::exit(1);
     });
 
     let pid = getpid();
     let content = format!("{}\n", pid.as_raw());
-    write(fd, content.as_bytes()).unwrap_or_else(|e| {
+    write(locked_fd.as_fd(), content.as_bytes()).unwrap_or_else(|e| {
         eprintln!("write failed: {e}");
         std::process::exit(1);
     });
@@ -53,4 +54,5 @@ fn main() {
     // Hold the lock until killed.  The 60-second cap avoids zombie processes if
     // the test runner fails to send SIGKILL.
     thread::sleep(Duration::from_secs(60));
+    // locked_fd is dropped here on normal exit, releasing the lock.
 }

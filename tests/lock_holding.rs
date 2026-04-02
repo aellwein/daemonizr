@@ -10,9 +10,8 @@
 //! file, acquires the exclusive flock, and sleeps until killed.  The test
 //! process itself checks lock availability before and after sending SIGKILL.
 use nix::{
-    fcntl::{FlockArg, OFlag, flock, open},
+    fcntl::{Flock, FlockArg, OFlag, open},
     sys::stat::Mode,
-    unistd::close,
 };
 use std::{
     io::{BufRead, BufReader},
@@ -79,11 +78,10 @@ fn test_lock_held_for_process_lifetime() {
         )
         .expect("could not open pid file for lock check (before kill)");
 
-        let lock_result = flock(fd, FlockArg::LockExclusiveNonblock);
-        let _ = close(fd);
-
+        let lock_result = Flock::lock(fd, FlockArg::LockExclusiveNonblock);
+        // fd is in lock_result and will be dropped here regardless of outcome.
         assert!(
-            matches!(lock_result, Err(nix::errno::Errno::EWOULDBLOCK)),
+            matches!(lock_result, Err((_, nix::errno::Errno::EWOULDBLOCK))),
             "expected EWOULDBLOCK while helper is alive, got {lock_result:?}"
         );
     }
@@ -105,8 +103,8 @@ fn test_lock_held_for_process_lifetime() {
         )
         .expect("could not open pid file for lock check (after kill)");
 
-        let lock_result = flock(fd, FlockArg::LockExclusiveNonblock);
-        let _ = close(fd);
+        let lock_result = Flock::lock(fd, FlockArg::LockExclusiveNonblock);
+        // fd (inside lock_result) is dropped here.
 
         if lock_result.is_ok() {
             break true;
