@@ -1,4 +1,5 @@
-[![Rust](https://github.com/aellwein/daemonizr/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/aellwein/daemonizr/actions/workflows/rust.yml) ![Crates.io](https://img.shields.io/crates/v/daemonizr)
+[![Rust](https://github.com/aellwein/daemonizr/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/aellwein/daemonizr/actions/workflows/rust.yml)
+[![Crates.io](https://img.shields.io/crates/v/daemonizr)](https://crates.io/crates/daemonizr)
 
 daemonizr
 =========
