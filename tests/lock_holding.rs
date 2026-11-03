@@ -10,23 +10,26 @@
 //! file, acquires the exclusive flock, and sleeps until killed.  The test
 //! process itself checks lock availability before and after sending SIGKILL.
 use nix::{
+    errno::Errno,
     fcntl::{Flock, FlockArg, OFlag, open},
     sys::stat::Mode,
 };
 use std::{
+    env, fs,
     io::{BufRead, BufReader},
     path::PathBuf,
-    process::{Command, Stdio},
-    time::Duration,
+    process::{self, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 /// Returns a path in the system temp directory that is unique to this test
 /// run to avoid conflicts with other parallel test processes.
 fn tmp_pidfile(suffix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
+    let mut p = env::temp_dir();
     p.push(format!(
         "daemonizr_inttest_{}_{}.pid",
-        std::process::id(),
+        process::id(),
         suffix
     ));
     p
@@ -47,7 +50,7 @@ fn tmp_pidfile(suffix: &str) -> PathBuf {
 #[test]
 fn test_lock_held_for_process_lifetime() {
     let pidfile = tmp_pidfile("lifetime");
-    let _ = std::fs::remove_file(&pidfile);
+    let _ = fs::remove_file(&pidfile);
 
     // ── Step 1: spawn the helper ──────────────────────────────────────────────
     let mut child = Command::new(env!("CARGO_BIN_EXE_pid_lock_helper"))
@@ -81,7 +84,7 @@ fn test_lock_held_for_process_lifetime() {
         let lock_result = Flock::lock(fd, FlockArg::LockExclusiveNonblock);
         // fd is in lock_result and will be dropped here regardless of outcome.
         assert!(
-            matches!(lock_result, Err((_, nix::errno::Errno::EWOULDBLOCK))),
+            matches!(lock_result, Err((_, Errno::EWOULDBLOCK))),
             "expected EWOULDBLOCK while helper is alive, got {lock_result:?}"
         );
     }
@@ -94,7 +97,7 @@ fn test_lock_held_for_process_lifetime() {
     // Use a retry loop with a 1-second deadline so that: (a) the test passes
     // quickly when the OS releases the lock immediately (the common case), and
     // (b) the test is still robust on slow or heavily loaded CI runners.
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let deadline = Instant::now() + Duration::from_secs(1);
     let lock_acquired = loop {
         let fd = open(
             &pidfile,
@@ -109,13 +112,13 @@ fn test_lock_held_for_process_lifetime() {
         if lock_result.is_ok() {
             break true;
         }
-        if std::time::Instant::now() >= deadline {
+        if Instant::now() >= deadline {
             break false;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(10));
     };
 
-    let _ = std::fs::remove_file(&pidfile);
+    let _ = fs::remove_file(&pidfile);
     assert!(
         lock_acquired,
         "lock was not released within 1 second after helper exited"
@@ -128,7 +131,7 @@ fn test_lock_held_for_process_lifetime() {
 #[test]
 fn test_second_spawn_gets_ewouldblock() {
     let pidfile = tmp_pidfile("second_spawn");
-    let _ = std::fs::remove_file(&pidfile);
+    let _ = fs::remove_file(&pidfile);
 
     // ── First "daemon" acquires the lock ─────────────────────────────────────
     let mut first = Command::new(env!("CARGO_BIN_EXE_pid_lock_helper"))
@@ -168,5 +171,5 @@ fn test_second_spawn_gets_ewouldblock() {
     // ── Clean up ─────────────────────────────────────────────────────────────
     first.kill().ok();
     first.wait().ok();
-    let _ = std::fs::remove_file(&pidfile);
+    let _ = fs::remove_file(&pidfile);
 }
